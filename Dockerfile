@@ -54,8 +54,8 @@ ENV GOPATH=/usr/local/go-tools \
 RUN go install golang.org/x/tools/cmd/goimports@latest
 RUN go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
 
-# Java - OpenJDK + formatters
-RUN apt-get install -y openjdk-17-jdk maven
+# Java - OpenJDK + formatters (Trixie ships with 21/23, 17 only headless)
+RUN apt-get install -y openjdk-21-jdk maven
 RUN mkdir -p /usr/local/java-tools && \
     wget https://github.com/google/google-java-format/releases/download/v1.22.0/google-java-format-1.22.0-all-deps.jar \
     -O /usr/local/java-tools/google-java-format.jar && \
@@ -71,8 +71,8 @@ RUN apt-get install -y clang-format clang-tidy
 RUN apt-get install -y shellcheck
 RUN go install mvdan.cc/sh/v3/cmd/shfmt@latest
 
-# SQL - sqlfluff (Python-based)
-RUN pip3 install --break-system-packages sqlfluff
+# SQL - sqlfluff (Python-based, ignore system package conflicts)
+RUN pip3 install --break-system-packages --ignore-installed sqlfluff
 
 # PHP - composer-based tools
 RUN apt-get install -y php php-xml php-mbstring php-curl unzip
