@@ -47,5 +47,93 @@ ENV RUSTUP_HOME=/usr/local/rustup \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
 RUN rustup component add rustfmt clippy
 
+# Go - native multi-arch support
+RUN apt-get install -y golang
+ENV GOPATH=/usr/local/go-tools \
+    PATH=/usr/local/go-tools/bin:$PATH
+RUN go install golang.org/x/tools/cmd/goimports@latest
+RUN go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+
+# Java - OpenJDK + formatters
+RUN apt-get install -y openjdk-17-jdk maven
+RUN mkdir -p /usr/local/java-tools && \
+    wget https://github.com/google/google-java-format/releases/download/v1.22.0/google-java-format-1.22.0-all-deps.jar \
+    -O /usr/local/java-tools/google-java-format.jar && \
+    wget https://github.com/checkstyle/checkstyle/releases/download/checkstyle-10.14.2/checkstyle-10.14.2-all.jar \
+    -O /usr/local/java-tools/checkstyle.jar && \
+    wget https://raw.githubusercontent.com/checkstyle/checkstyle/checkstyle-10.14.2/src/main/resources/google_checks.xml \
+    -O /usr/local/java-tools/google_checks.xml
+
+# C/C++ - LLVM/Clang tools
+RUN apt-get install -y clang-format clang-tidy
+
+# Shell - shfmt + shellcheck
+RUN apt-get install -y shellcheck
+RUN go install mvdan.cc/sh/v3/cmd/shfmt@latest
+
+# SQL - sqlfluff (Python-based)
+RUN pip3 install --break-system-packages sqlfluff
+
+# PHP - composer-based tools
+RUN apt-get install -y php php-xml php-mbstring php-curl unzip
+RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+ENV COMPOSER_HOME=/usr/local/composer
+RUN composer global require friendsofphp/php-cs-fixer
+RUN composer global require phpstan/phpstan
+ENV PATH="${COMPOSER_HOME}/vendor/bin:$PATH"
+
+# Kotlin - ktlint (standalone binary)
+RUN wget https://github.com/pinterest/ktlint/releases/download/1.1.1/ktlint -O /usr/local/bin/ktlint && \
+    chmod +x /usr/local/bin/ktlint
+
+# ============================================================================
+# EXPERIMENTAL/OPTIONAL TOOLS (failures won't break build)
+# ============================================================================
+
+# Swift - only for arm64/amd64 Linux (limited support, may fail on some platforms)
+RUN if [ "$TARGETARCH" = "arm64" ] || [ "$TARGETARCH" = "amd64" ]; then \
+      (apt-get install -y binutils git gnupg2 libc6-dev libcurl4-openssl-dev \
+        libedit2 libgcc-s1 libpython3-dev libsqlite3-0 libstdc++6 libxml2-dev \
+        libz3-dev pkg-config tzdata zlib1g-dev && \
+      pip3 install --break-system-packages swiftformat && \
+      echo "✓ Swift tools installed") || \
+      echo "⚠ Swift tools installation failed (non-critical)"; \
+    else \
+      echo "⚠ Swift not supported on $TARGETARCH (non-critical)"; \
+    fi
+
+# Ruby - rbenv + rubocop
+RUN apt-get install -y ruby ruby-dev
+RUN gem install rubocop
+
+# Markdown - markdownlint (npm)
+RUN pnpm install -g markdownlint-cli
+
+# YAML - yamllint (Python)
+RUN pip3 install --break-system-packages yamllint
+
+# ============================================================================
+# VERIFICATION & HEALTH CHECKS
+# ============================================================================
+
+# Verify critical tools are installed
+RUN echo "=== Verifying critical tools ===" && \
+    python3 --version && \
+    ruff --version && \
+    node --version && \
+    prettier --version && \
+    dotnet --version && \
+    rustc --version && \
+    go version && \
+    java -version && \
+    clang-format --version && \
+    shellcheck --version && \
+    echo "✓ All critical tools verified"
+
+# List optional tools status
+RUN echo "=== Optional tools status ===" && \
+    (swiftformat --version 2>/dev/null && echo "✓ Swift tools available") || echo "⚠ Swift tools not available" && \
+    echo "=== Tool verification complete ==="
+
 # Cleanup
 RUN apt-get clean && rm -rf /var/lib/apt/lists/*

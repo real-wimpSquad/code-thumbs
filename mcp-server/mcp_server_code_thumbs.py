@@ -57,13 +57,13 @@ async def handle_list_tools() -> list[Any]:
                 "properties": {
                     "language": {
                         "type": "string",
-                        "enum": ["python", "javascript", "typescript", "csharp", "rust"],
+                        "enum": ["python", "javascript", "typescript", "csharp", "rust", "go", "java", "c", "cpp", "shell", "sql", "php", "kotlin", "swift", "ruby", "markdown", "yaml"],
                         "description": "Programming language",
                     },
                     "content": {"type": "string", "description": "Source code to format"},
                     "tool": {
                         "type": "string",
-                        "description": "Specific formatter (optional: ruff, black, prettier, csharpier, rustfmt)",
+                        "description": "Specific formatter (optional - see /languages endpoint for full list)",
                     },
                     "check_only": {
                         "type": "boolean",
@@ -82,13 +82,13 @@ async def handle_list_tools() -> list[Any]:
                 "properties": {
                     "language": {
                         "type": "string",
-                        "enum": ["python", "javascript", "typescript", "csharp", "rust"],
+                        "enum": ["python", "javascript", "typescript", "csharp", "rust", "go", "java", "c", "cpp", "shell", "sql", "php", "kotlin", "swift", "ruby", "markdown", "yaml"],
                         "description": "Programming language",
                     },
                     "content": {"type": "string", "description": "Source code to lint"},
                     "tool": {
                         "type": "string",
-                        "description": "Specific linter (optional: ruff, pylint, mypy, eslint, cargo-clippy)",
+                        "description": "Specific linter (optional - see /languages endpoint for full list)",
                     },
                 },
                 "required": ["language", "content"],
@@ -102,13 +102,13 @@ async def handle_list_tools() -> list[Any]:
                 "properties": {
                     "language": {
                         "type": "string",
-                        "enum": ["python", "javascript", "typescript"],
-                        "description": "Programming language (fix only supported for python, javascript, typescript)",
+                        "enum": ["python", "javascript", "typescript", "go", "sql", "php", "kotlin", "ruby", "markdown"],
+                        "description": "Programming language (fix only supported for these languages)",
                     },
                     "content": {"type": "string", "description": "Source code to fix"},
                     "tool": {
                         "type": "string",
-                        "description": "Specific fixing tool (optional: ruff, eslint)",
+                        "description": "Specific fixing tool (optional - see /languages endpoint for full list)",
                     },
                 },
                 "required": ["language", "content"],
@@ -122,7 +122,7 @@ async def handle_list_tools() -> list[Any]:
                 "properties": {
                     "language": {
                         "type": "string",
-                        "enum": ["python", "javascript", "typescript", "csharp", "rust"],
+                        "enum": ["python", "javascript", "typescript", "csharp", "rust", "go", "java", "c", "cpp", "shell", "sql", "php", "kotlin", "swift", "ruby", "markdown", "yaml"],
                         "description": "Programming language",
                     },
                     "content": {"type": "string", "description": "Source code to check"},
@@ -140,84 +140,27 @@ async def handle_list_tools() -> list[Any]:
 
 @server.call_tool()
 async def handle_call_tool(name: str, arguments: dict) -> list[Any]:
-    """Handle tool execution - compressed ml-exclusive output"""
+    """Handle tool execution - pass through ml-exclusive output from API"""
     try:
+        # API endpoints that return compressed format
         if name == "format_code":
             result = await call_api("/format", "POST", arguments)
-            if arguments.get("check_only"):
-                status = "needs_fmt" if result["changed"] else "clean"
-                return [{"type": "text", "text": f"fmt_check:{status}|tool:{result['tool_used']}"}]
-            else:
-                changed = "yes" if result["changed"] else "no"
-                return [
-                    {
-                        "type": "text",
-                        "text": f"tool:{result['tool_used']}|changed:{changed}\n\n{result['formatted_content']}",
-                    }
-                ]
+            return [{"type": "text", "text": result["result"]}]
 
         elif name == "lint_code":
             result = await call_api("/lint", "POST", arguments)
-
-            if result["clean"]:
-                return [{"type": "text", "text": f"clean|tool:{result['tool_used']}"}]
-
-            # Compressed issue list
-            issues_compressed = []
-            for issue in result["issues"]:
-                sev = issue["severity"][0]  # e, w, i
-                fixable = "f" if issue.get("fixable") else ""
-                line = issue.get("line", "?")
-                code = issue.get("code", "")
-                msg = issue["message"]
-                issues_compressed.append(f"L{line}:{sev}{fixable}:{code}:{msg}")
-
-            header = f"tool:{result['tool_used']}|err:{result['error_count']}|warn:{result['warning_count']}|info:{result['info_count']}"
-            issues_text = "\n".join(issues_compressed)
-            return [{"type": "text", "text": f"{header}\n{issues_text}"}]
+            return [{"type": "text", "text": result["result"]}]
 
         elif name == "fix_code":
             result = await call_api("/fix", "POST", arguments)
-
-            if result["changes_made"]:
-                remaining = len(result["remaining_issues"])
-                header = f"tool:{result['tool_used']}|fixed:yes|remaining:{remaining}"
-                if result["remaining_issues"]:
-                    issues = "|".join(
-                        f"L{i.get('line','?')}:{i['message'][:40]}" for i in result["remaining_issues"][:5]
-                    )
-                    return [{"type": "text", "text": f"{header}\nissues:{issues}\n\n{result['fixed_content']}"}]
-                else:
-                    return [{"type": "text", "text": f"{header}\n\n{result['fixed_content']}"}]
-            else:
-                return [{"type": "text", "text": f"tool:{result['tool_used']}|fixed:no|reason:no_fixable_issues"}]
+            return [{"type": "text", "text": result["result"]}]
 
         elif name == "check_code":
             result = await call_api("/check", "POST", arguments)
-
-            if result["overall_clean"]:
-                return [{"type": "text", "text": "clean:fmt+lint"}]
-
-            fmt_status = "needs_fmt" if result["format_issues"] else "clean"
-            lint_issues = result["lint_issues"]
-            err_cnt = sum(1 for i in lint_issues if i["severity"] == "error")
-            warn_cnt = sum(1 for i in lint_issues if i["severity"] == "warning")
-            lint_status = f"err:{err_cnt}+warn:{warn_cnt}" if lint_issues else "clean"
-
-            report = f"fmt:{fmt_status}|lint:{lint_status}"
-
-            if lint_issues:
-                top_issues = []
-                for issue in lint_issues[:5]:
-                    sev = issue["severity"][0]
-                    line = issue.get("line", "?")
-                    msg = issue["message"][:50]
-                    top_issues.append(f"L{line}:{sev}:{msg}")
-                report += "\n" + "\n".join(top_issues)
-
-            return [{"type": "text", "text": report}]
+            return [{"type": "text", "text": result["result"]}]
 
         elif name == "list_languages":
+            # /languages still returns structured format, compress it here
             result = await call_api("/languages", "GET")
             langs_compressed = []
             for lang in result["languages"]:
@@ -234,9 +177,16 @@ async def handle_call_tool(name: str, arguments: dict) -> list[Any]:
             return [{"type": "text", "text": f"err:unknown_tool:{name}"}]
 
     except httpx.HTTPStatusError as e:
-        return [{"type": "text", "text": f"err:{e.response.status_code}|detail:{e.response.text}"}]
+        # API now returns ml-exclusive errors, extract from response
+        try:
+            error_data = e.response.json()
+            if "result" in error_data:
+                return [{"type": "text", "text": error_data["result"]}]
+        except:
+            pass
+        return [{"type": "text", "text": f"err:http_{e.response.status_code}|detail:{e.response.text[:100]}"}]
     except Exception as e:
-        return [{"type": "text", "text": f"err:exception|msg:{str(e)}"}]
+        return [{"type": "text", "text": f"err:exception|msg:{str(e)[:100]}"}]
 
 
 # ============================================================================

@@ -11,7 +11,8 @@ Code Quality API - OpenAI/MCP-compatible endpoints for code_thumbs container
 Exposes formatting, linting, and auto-fixing as HTTP API
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from typing import Optional, List, Literal
 import subprocess
@@ -26,6 +27,33 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
 )
+
+
+# ============================================================================
+# CUSTOM EXCEPTION HANDLER (ML-EXCLUSIVE ERROR FORMAT)
+# ============================================================================
+
+
+@app.exception_handler(HTTPException)
+async def ml_exclusive_exception_handler(request: Request, exc: HTTPException):
+    """Return compressed error format for agent consumption"""
+    # Map HTTP status to error type
+    error_type = {
+        400: "bad_req",
+        404: "not_found",
+        500: "server_err",
+        503: "unavailable",
+        504: "timeout",
+    }.get(exc.status_code, "error")
+
+    # Compress error message
+    detail = exc.detail.replace(" ", "_").replace("'", "").lower()[:100]
+    compressed = f"err:{error_type}|code:{exc.status_code}|msg:{detail}"
+
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"result": compressed}
+    )
 
 # ============================================================================
 # TOOL REGISTRY
@@ -71,6 +99,102 @@ LANGUAGE_TOOLS = {
         "default_format": "rustfmt",
         "default_lint": "cargo-clippy",
         "extensions": [".rs"],
+    },
+    "go": {
+        "format": ["gofmt", "goimports"],
+        "lint": ["golangci-lint"],
+        "fix": ["golangci-lint"],
+        "default_format": "gofmt",
+        "default_lint": "golangci-lint",
+        "extensions": [".go"],
+    },
+    "java": {
+        "format": ["google-java-format"],
+        "lint": ["checkstyle"],
+        "fix": [],
+        "default_format": "google-java-format",
+        "default_lint": "checkstyle",
+        "extensions": [".java"],
+    },
+    "c": {
+        "format": ["clang-format"],
+        "lint": ["clang-tidy"],
+        "fix": [],
+        "default_format": "clang-format",
+        "default_lint": "clang-tidy",
+        "extensions": [".c", ".h"],
+    },
+    "cpp": {
+        "format": ["clang-format"],
+        "lint": ["clang-tidy"],
+        "fix": [],
+        "default_format": "clang-format",
+        "default_lint": "clang-tidy",
+        "extensions": [".cpp", ".hpp", ".cc", ".cxx", ".hxx"],
+    },
+    "shell": {
+        "format": ["shfmt"],
+        "lint": ["shellcheck"],
+        "fix": [],
+        "default_format": "shfmt",
+        "default_lint": "shellcheck",
+        "extensions": [".sh", ".bash"],
+    },
+    "sql": {
+        "format": ["sqlfluff"],
+        "lint": ["sqlfluff"],
+        "fix": ["sqlfluff"],
+        "default_format": "sqlfluff",
+        "default_lint": "sqlfluff",
+        "extensions": [".sql"],
+    },
+    "php": {
+        "format": ["php-cs-fixer"],
+        "lint": ["phpstan"],
+        "fix": ["php-cs-fixer"],
+        "default_format": "php-cs-fixer",
+        "default_lint": "phpstan",
+        "extensions": [".php"],
+    },
+    "kotlin": {
+        "format": ["ktlint"],
+        "lint": ["ktlint"],
+        "fix": ["ktlint"],
+        "default_format": "ktlint",
+        "default_lint": "ktlint",
+        "extensions": [".kt", ".kts"],
+    },
+    "swift": {
+        "format": ["swiftformat"],
+        "lint": [],
+        "fix": [],
+        "default_format": "swiftformat",
+        "default_lint": "",
+        "extensions": [".swift"],
+    },
+    "ruby": {
+        "format": ["rubocop"],
+        "lint": ["rubocop"],
+        "fix": ["rubocop"],
+        "default_format": "rubocop",
+        "default_lint": "rubocop",
+        "extensions": [".rb"],
+    },
+    "markdown": {
+        "format": ["prettier"],
+        "lint": ["markdownlint"],
+        "fix": ["markdownlint"],
+        "default_format": "prettier",
+        "default_lint": "markdownlint",
+        "extensions": [".md", ".markdown"],
+    },
+    "yaml": {
+        "format": ["prettier"],
+        "lint": ["yamllint"],
+        "fix": [],
+        "default_format": "prettier",
+        "default_lint": "yamllint",
+        "extensions": [".yaml", ".yml"],
     },
 }
 
@@ -150,6 +274,35 @@ class CheckResponse(BaseModel):
 
 
 # ============================================================================
+# BATCH REQUEST/RESPONSE MODELS
+# ============================================================================
+
+
+class FileContent(BaseModel):
+    path: str = Field(..., description="File path or identifier")
+    content: str = Field(..., description="File content")
+
+
+class BatchFormatRequest(BaseModel):
+    language: str = Field(..., description="Programming language")
+    files: List[FileContent] = Field(..., description="Files to format")
+    tool: Optional[str] = Field(None, description="Specific tool to use")
+    check_only: bool = Field(False, description="Only check formatting")
+
+
+class BatchLintRequest(BaseModel):
+    language: str = Field(..., description="Programming language")
+    files: List[FileContent] = Field(..., description="Files to lint")
+    tool: Optional[str] = Field(None, description="Specific linting tool")
+
+
+class BatchFixRequest(BaseModel):
+    language: str = Field(..., description="Programming language")
+    files: List[FileContent] = Field(..., description="Files to fix")
+    tool: Optional[str] = Field(None, description="Specific fixing tool")
+
+
+# ============================================================================
 # DOCKER EXECUTION HELPERS
 # ============================================================================
 
@@ -181,6 +334,29 @@ def exec_in_container(
         raise HTTPException(status_code=504, detail="Tool execution timed out")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Container execution failed: {e}")
+
+
+def verify_tool_available(tool: str) -> bool:
+    """Check if a tool is available in the container"""
+    try:
+        returncode, stdout, stderr = exec_in_container(["which", tool])
+        if returncode == 0:
+            return True
+
+        # Special cases for tools invoked differently
+        if tool == "google-java-format":
+            returncode, _, _ = exec_in_container(["test", "-f", "/usr/local/java-tools/google-java-format.jar"])
+            return returncode == 0
+        elif tool == "checkstyle":
+            returncode, _, _ = exec_in_container(["test", "-f", "/usr/local/java-tools/checkstyle.jar"])
+            return returncode == 0
+        elif tool in ["cargo-clippy", "cargo-fmt"]:
+            returncode, _, _ = exec_in_container(["cargo", "--version"])
+            return returncode == 0
+
+        return False
+    except:
+        return False
 
 
 def write_temp_file(content: str, language: str) -> str:
@@ -292,6 +468,85 @@ def parse_eslint_output(output: str) -> List[LintIssue]:
 
 
 # ============================================================================
+# ML-EXCLUSIVE COMPRESSION HELPERS
+# ============================================================================
+
+
+def compress_format_response(result: dict, check_only: bool) -> str:
+    """Compress format response to ml-exclusive format"""
+    if check_only:
+        status = "needs_fmt" if result["changed"] else "clean"
+        return f"fmt_check:{status}|tool:{result['tool_used']}"
+    else:
+        changed = "yes" if result["changed"] else "no"
+        content = result.get("formatted_content", "")
+        return f"tool:{result['tool_used']}|changed:{changed}\n\n{content}"
+
+
+def compress_lint_response(result: dict) -> str:
+    """Compress lint response to ml-exclusive format"""
+    if result["clean"]:
+        return f"clean|tool:{result['tool_used']}"
+
+    # Compressed issue list: L<line>:<sev>[f]:<code>:<msg>
+    issues_compressed = []
+    for issue in result["issues"]:
+        sev = issue["severity"][0]  # e, w, i
+        fixable = "f" if issue.get("fixable") else ""
+        line = issue.get("line", "?")
+        code = issue.get("code", "")
+        msg = issue["message"]
+        issues_compressed.append(f"L{line}:{sev}{fixable}:{code}:{msg}")
+
+    header = f"tool:{result['tool_used']}|err:{result['error_count']}|warn:{result['warning_count']}|info:{result['info_count']}"
+    issues_text = "\n".join(issues_compressed)
+    return f"{header}\n{issues_text}"
+
+
+def compress_fix_response(result: dict) -> str:
+    """Compress fix response to ml-exclusive format"""
+    if not result["changes_made"]:
+        return f"tool:{result['tool_used']}|fixed:no|reason:no_fixable_issues"
+
+    remaining = len(result["remaining_issues"])
+    header = f"tool:{result['tool_used']}|fixed:yes|remaining:{remaining}"
+
+    if result["remaining_issues"]:
+        issues = "|".join(
+            f"L{i.get('line','?')}:{i['message'][:40]}"
+            for i in result["remaining_issues"][:5]
+        )
+        return f"{header}\nissues:{issues}\n\n{result['fixed_content']}"
+    else:
+        return f"{header}\n\n{result['fixed_content']}"
+
+
+def compress_check_response(result: dict) -> str:
+    """Compress check response to ml-exclusive format"""
+    if result["overall_clean"]:
+        return "clean:fmt+lint"
+
+    fmt_status = "needs_fmt" if result["format_issues"] else "clean"
+    lint_issues = result["lint_issues"]
+    err_cnt = sum(1 for i in lint_issues if i["severity"] == "error")
+    warn_cnt = sum(1 for i in lint_issues if i["severity"] == "warning")
+    lint_status = f"err:{err_cnt}+warn:{warn_cnt}" if lint_issues else "clean"
+
+    report = f"fmt:{fmt_status}|lint:{lint_status}"
+
+    if lint_issues:
+        top_issues = []
+        for issue in lint_issues[:5]:
+            sev = issue["severity"][0]
+            line = issue.get("line", "?")
+            msg = issue["message"][:50]
+            top_issues.append(f"L{line}:{sev}:{msg}")
+        report += "\n" + "\n".join(top_issues)
+
+    return report
+
+
+# ============================================================================
 # API ENDPOINTS
 # ============================================================================
 
@@ -326,18 +581,31 @@ async def root():
 
 @app.get("/health")
 async def health():
-    """Health check - verify container is accessible"""
+    """Health check - verify container is accessible and show tool availability"""
     try:
         returncode, stdout, stderr = exec_in_container(["echo", "ready"])
+        container_name = os.environ.get("CODE_THUMBS_CONTAINER", "code_thumbs")
+
         if returncode == 0:
-            container_name = os.environ.get("CODE_THUMBS_CONTAINER", "code_thumbs")
+            # Check critical tools
+            critical_tools = ["ruff", "prettier", "gofmt", "clang-format", "shellcheck"]
+            optional_tools = ["swiftformat"]
+
+            tool_status = {}
+            for tool in critical_tools + optional_tools:
+                tool_status[tool] = "available" if verify_tool_available(tool) else "missing"
+
+            all_critical_available = all(
+                tool_status.get(t) == "available" for t in critical_tools
+            )
+
             return {
-                "status": "healthy",
+                "status": "healthy" if all_critical_available else "degraded",
                 "container": container_name,
                 "accessible": True,
+                "tools": tool_status,
             }
         else:
-            container_name = os.environ.get("CODE_THUMBS_CONTAINER", "code_thumbs")
             return {
                 "status": "degraded",
                 "container": container_name,
@@ -369,7 +637,7 @@ async def list_languages():
     }
 
 
-@app.post("/format", response_model=FormatResponse)
+@app.post("/format")
 async def format_code(req: FormatRequest):
     """Format code using specified or default formatter"""
     if req.language not in LANGUAGE_TOOLS:
@@ -391,11 +659,7 @@ async def format_code(req: FormatRequest):
     try:
         # Build command based on tool
         if tool == "ruff":
-            cmd = [
-                "ruff",
-                "format" if not req.check_only else "format --check",
-                filepath,
-            ]
+            cmd = ["ruff", "format" if not req.check_only else "format --check", filepath]
         elif tool == "black":
             cmd = ["black", "--check" if req.check_only else "", filepath]
         elif tool == "prettier":
@@ -404,11 +668,73 @@ async def format_code(req: FormatRequest):
             cmd = ["csharpier", "--check" if req.check_only else "", filepath]
         elif tool == "rustfmt":
             cmd = ["rustfmt", "--check" if req.check_only else "", filepath]
+        elif tool == "gofmt":
+            if req.check_only:
+                cmd = ["gofmt", "-l", filepath]
+            else:
+                cmd = ["gofmt", "-w", filepath]
+        elif tool == "goimports":
+            if req.check_only:
+                cmd = ["goimports", "-l", filepath]
+            else:
+                cmd = ["goimports", "-w", filepath]
+        elif tool == "google-java-format":
+            if req.check_only:
+                cmd = ["java", "-jar", "/usr/local/java-tools/google-java-format.jar", "--dry-run", filepath]
+            else:
+                cmd = ["java", "-jar", "/usr/local/java-tools/google-java-format.jar", "-i", filepath]
+        elif tool == "clang-format":
+            if req.check_only:
+                cmd = ["clang-format", "--dry-run", "-Werror", filepath]
+            else:
+                cmd = ["clang-format", "-i", filepath]
+        elif tool == "shfmt":
+            if req.check_only:
+                cmd = ["shfmt", "-d", filepath]
+            else:
+                cmd = ["shfmt", "-w", filepath]
+        elif tool == "sqlfluff":
+            if req.check_only:
+                cmd = ["sqlfluff", "format", "--check", filepath]
+            else:
+                cmd = ["sqlfluff", "format", filepath]
+        elif tool == "php-cs-fixer":
+            if req.check_only:
+                cmd = ["php-cs-fixer", "fix", "--dry-run", filepath]
+            else:
+                cmd = ["php-cs-fixer", "fix", filepath]
+        elif tool == "ktlint":
+            if req.check_only:
+                cmd = ["ktlint", filepath]
+            else:
+                cmd = ["ktlint", "-F", filepath]
+        elif tool == "swiftformat":
+            if req.check_only:
+                cmd = ["swiftformat", "--lint", filepath]
+            else:
+                cmd = ["swiftformat", filepath]
+        elif tool == "rubocop":
+            if req.check_only:
+                cmd = ["rubocop", filepath]
+            else:
+                cmd = ["rubocop", "-a", filepath]
+        elif tool == "markdownlint":
+            if req.check_only:
+                cmd = ["markdownlint", filepath]
+            else:
+                cmd = ["markdownlint", "--fix", filepath]
         else:
             raise HTTPException(status_code=400, detail=f"Unknown tool: {tool}")
 
         # Filter empty strings from cmd
         cmd = [c for c in cmd if c]
+
+        # Verify tool is available before executing
+        if not verify_tool_available(tool):
+            raise HTTPException(
+                status_code=503,
+                detail=f"Tool '{tool}' not available in container. It may not be installed or failed during build."
+            )
 
         returncode, stdout, stderr = exec_in_container(cmd)
 
@@ -421,18 +747,22 @@ async def format_code(req: FormatRequest):
             formatted_content = read_temp_file(filepath)
             changed = formatted_content != req.content
 
-        return FormatResponse(
-            formatted_content=formatted_content,
-            changed=changed,
-            tool_used=tool,
-            diff=stderr if changed else None,
-        )
+        # Build response dict for compression
+        result = {
+            "formatted_content": formatted_content,
+            "changed": changed,
+            "tool_used": tool,
+            "diff": stderr if changed else None,
+        }
+
+        # Return ml-exclusive compressed format
+        return {"result": compress_format_response(result, req.check_only)}
 
     finally:
         cleanup_temp_file(filepath)
 
 
-@app.post("/lint", response_model=LintResponse)
+@app.post("/lint")
 async def lint_code(req: LintRequest):
     """Lint code and return structured issues"""
     if req.language not in LANGUAGE_TOOLS:
@@ -460,8 +790,41 @@ async def lint_code(req: LintRequest):
             cmd = ["mypy", filepath]
         elif tool == "eslint":
             cmd = ["eslint", filepath]
+        elif tool == "golangci-lint":
+            cmd = ["golangci-lint", "run", filepath]
+        elif tool == "checkstyle":
+            cmd = ["java", "-jar", "/usr/local/java-tools/checkstyle.jar", "-c", "/usr/local/java-tools/google_checks.xml", filepath]
+        elif tool == "clang-tidy":
+            cmd = ["clang-tidy", filepath]
+        elif tool == "shellcheck":
+            cmd = ["shellcheck", filepath]
+        elif tool == "sqlfluff":
+            cmd = ["sqlfluff", "lint", filepath]
+        elif tool == "phpstan":
+            cmd = ["phpstan", "analyze", filepath]
+        elif tool == "ktlint":
+            cmd = ["ktlint", filepath]
+        elif tool == "rubocop":
+            cmd = ["rubocop", filepath]
+        elif tool == "markdownlint":
+            cmd = ["markdownlint", filepath]
+        elif tool == "yamllint":
+            cmd = ["yamllint", filepath]
+        elif tool == "dotnet-format":
+            cmd = ["dotnet-format", "--verify-no-changes", filepath]
+        elif tool == "cargo-clippy":
+            cmd = ["cargo", "clippy", "--", "-D", "warnings"]
+        elif tool == "tsc":
+            cmd = ["tsc", "--noEmit", filepath]
         else:
             raise HTTPException(status_code=400, detail=f"Unknown tool: {tool}")
+
+        # Verify tool is available before executing
+        if not verify_tool_available(tool):
+            raise HTTPException(
+                status_code=503,
+                detail=f"Tool '{tool}' not available in container. It may not be installed or failed during build."
+            )
 
         returncode, stdout, stderr = exec_in_container(cmd)
         output = stdout + stderr
@@ -478,20 +841,24 @@ async def lint_code(req: LintRequest):
         warning_count = sum(1 for i in issues if i.severity == "warning")
         info_count = sum(1 for i in issues if i.severity == "info")
 
-        return LintResponse(
-            issues=issues,
-            error_count=error_count,
-            warning_count=warning_count,
-            info_count=info_count,
-            tool_used=tool,
-            clean=len(issues) == 0,
-        )
+        # Build response dict for compression
+        result = {
+            "issues": [i.dict() for i in issues],
+            "error_count": error_count,
+            "warning_count": warning_count,
+            "info_count": info_count,
+            "tool_used": tool,
+            "clean": len(issues) == 0,
+        }
+
+        # Return ml-exclusive compressed format
+        return {"result": compress_lint_response(result)}
 
     finally:
         cleanup_temp_file(filepath)
 
 
-@app.post("/fix", response_model=FixResponse)
+@app.post("/fix")
 async def fix_code(req: FixRequest):
     """Auto-fix code issues where possible"""
     if req.language not in LANGUAGE_TOOLS:
@@ -521,8 +888,27 @@ async def fix_code(req: FixRequest):
             cmd = ["ruff", "check", "--fix", filepath]
         elif tool == "eslint":
             cmd = ["eslint", "--fix", filepath]
+        elif tool == "golangci-lint":
+            cmd = ["golangci-lint", "run", "--fix", filepath]
+        elif tool == "sqlfluff":
+            cmd = ["sqlfluff", "fix", filepath]
+        elif tool == "php-cs-fixer":
+            cmd = ["php-cs-fixer", "fix", filepath]
+        elif tool == "ktlint":
+            cmd = ["ktlint", "-F", filepath]
+        elif tool == "rubocop":
+            cmd = ["rubocop", "-a", filepath]
+        elif tool == "markdownlint":
+            cmd = ["markdownlint", "--fix", filepath]
         else:
             raise HTTPException(status_code=400, detail=f"Unknown tool: {tool}")
+
+        # Verify tool is available before executing
+        if not verify_tool_available(tool):
+            raise HTTPException(
+                status_code=503,
+                detail=f"Tool '{tool}' not available in container. It may not be installed or failed during build."
+            )
 
         returncode, stdout, stderr = exec_in_container(cmd)
 
@@ -541,40 +927,216 @@ async def fix_code(req: FixRequest):
         # Extract what was fixed (rough heuristic)
         issues_fixed = ["Auto-fixed issues"] if changes_made else []
 
-        return FixResponse(
-            fixed_content=fixed_content,
-            issues_fixed=issues_fixed,
-            remaining_issues=remaining_issues,
-            tool_used=tool,
-            changes_made=changes_made,
-        )
+        # Build response dict for compression
+        result = {
+            "fixed_content": fixed_content,
+            "issues_fixed": issues_fixed,
+            "remaining_issues": [i.dict() for i in remaining_issues],
+            "tool_used": tool,
+            "changes_made": changes_made,
+        }
+
+        # Return ml-exclusive compressed format
+        return {"result": compress_fix_response(result)}
 
     finally:
         cleanup_temp_file(filepath)
 
 
-@app.post("/check", response_model=CheckResponse)
+@app.post("/check")
 async def check_code(req: CheckRequest):
     """Comprehensive check: format + lint + compile (if applicable)"""
+    if req.language not in LANGUAGE_TOOLS:
+        raise HTTPException(
+            status_code=400, detail=f"Unsupported language: {req.language}"
+        )
+
     # Check formatting
-    format_req = FormatRequest(
-        language=req.language, content=req.content, check_only=True
-    )
-    format_resp = await format_code(format_req)
+    lang_config = LANGUAGE_TOOLS[req.language]
+    tool = lang_config["default_format"]
 
-    # Run linting
-    lint_req = LintRequest(language=req.language, content=req.content)
-    lint_resp = await lint_code(lint_req)
+    filepath = write_temp_file(req.content, req.language)
 
-    # TODO: Add compilation checks for compiled languages (tsc, cargo check, etc)
+    try:
+        # Format check
+        format_changed = False
+        if tool == "ruff":
+            cmd = ["ruff", "format", "--check", filepath]
+        elif tool == "prettier":
+            cmd = ["prettier", "--check", filepath]
+        elif tool == "gofmt":
+            cmd = ["gofmt", "-l", filepath]
+        else:
+            # Use generic check for other formatters
+            cmd = [tool, "--check", filepath] if tool else []
 
-    overall_clean = not format_resp.changed and lint_resp.clean
+        if cmd and verify_tool_available(tool):
+            returncode, _, _ = exec_in_container(cmd)
+            format_changed = returncode != 0
 
-    return CheckResponse(
-        format_issues=format_resp.changed,
-        lint_issues=lint_resp.issues,
-        overall_clean=overall_clean,
-    )
+        # Lint check
+        lint_tool = lang_config["default_lint"]
+        lint_issues = []
+
+        if lint_tool and verify_tool_available(lint_tool):
+            if lint_tool == "ruff":
+                cmd = ["ruff", "check", filepath]
+            elif lint_tool == "eslint":
+                cmd = ["eslint", filepath]
+            elif lint_tool == "golangci-lint":
+                cmd = ["golangci-lint", "run", filepath]
+            else:
+                cmd = [lint_tool, filepath]
+
+            returncode, stdout, stderr = exec_in_container(cmd)
+            output = stdout + stderr
+
+            if lint_tool in ["ruff", "pylint", "mypy"]:
+                lint_issues = parse_ruff_output(output)
+            elif lint_tool == "eslint":
+                lint_issues = parse_eslint_output(output)
+
+        overall_clean = not format_changed and len(lint_issues) == 0
+
+        # Build response dict for compression
+        result = {
+            "format_issues": format_changed,
+            "lint_issues": [i.dict() for i in lint_issues],
+            "overall_clean": overall_clean,
+        }
+
+        # Return ml-exclusive compressed format
+        return {"result": compress_check_response(result)}
+
+    finally:
+        cleanup_temp_file(filepath)
+
+
+# ============================================================================
+# BATCH ENDPOINTS
+# ============================================================================
+
+
+@app.post("/batch/format")
+async def batch_format(req: BatchFormatRequest):
+    """Format multiple files in batch"""
+    if req.language not in LANGUAGE_TOOLS:
+        raise HTTPException(
+            status_code=400, detail=f"Unsupported language: {req.language}"
+        )
+
+    lang_config = LANGUAGE_TOOLS[req.language]
+    tool = req.tool or lang_config["default_format"]
+
+    if tool not in lang_config["format"]:
+        raise HTTPException(
+            status_code=400, detail=f"Tool {tool} not available for {req.language}"
+        )
+
+    if not verify_tool_available(tool):
+        raise HTTPException(
+            status_code=503,
+            detail=f"Tool '{tool}' not available in container."
+        )
+
+    results = []
+    for file in req.files:
+        try:
+            # Reuse single-file format logic
+            format_req = FormatRequest(
+                language=req.language,
+                content=file.content,
+                tool=tool,
+                check_only=req.check_only
+            )
+            result = await format_code(format_req)
+            results.append(f"{file.path}|{result['result']}")
+        except Exception as e:
+            results.append(f"{file.path}|err:{str(e)}")
+
+    return {"result": "\n---\n".join(results)}
+
+
+@app.post("/batch/lint")
+async def batch_lint(req: BatchLintRequest):
+    """Lint multiple files in batch"""
+    if req.language not in LANGUAGE_TOOLS:
+        raise HTTPException(
+            status_code=400, detail=f"Unsupported language: {req.language}"
+        )
+
+    lang_config = LANGUAGE_TOOLS[req.language]
+    tool = req.tool or lang_config["default_lint"]
+
+    if tool not in lang_config["lint"]:
+        raise HTTPException(
+            status_code=400, detail=f"Tool {tool} not available for {req.language}"
+        )
+
+    if not verify_tool_available(tool):
+        raise HTTPException(
+            status_code=503,
+            detail=f"Tool '{tool}' not available in container."
+        )
+
+    results = []
+    for file in req.files:
+        try:
+            lint_req = LintRequest(
+                language=req.language,
+                content=file.content,
+                tool=tool
+            )
+            result = await lint_code(lint_req)
+            results.append(f"{file.path}|{result['result']}")
+        except Exception as e:
+            results.append(f"{file.path}|err:{str(e)}")
+
+    return {"result": "\n---\n".join(results)}
+
+
+@app.post("/batch/fix")
+async def batch_fix(req: BatchFixRequest):
+    """Fix multiple files in batch"""
+    if req.language not in LANGUAGE_TOOLS:
+        raise HTTPException(
+            status_code=400, detail=f"Unsupported language: {req.language}"
+        )
+
+    lang_config = LANGUAGE_TOOLS[req.language]
+
+    if not lang_config["fix"]:
+        raise HTTPException(
+            status_code=400, detail=f"Auto-fix not supported for {req.language}"
+        )
+
+    tool = req.tool or lang_config["fix"][0]
+
+    if tool not in lang_config["fix"]:
+        raise HTTPException(
+            status_code=400, detail=f"Tool {tool} cannot auto-fix for {req.language}"
+        )
+
+    if not verify_tool_available(tool):
+        raise HTTPException(
+            status_code=503,
+            detail=f"Tool '{tool}' not available in container."
+        )
+
+    results = []
+    for file in req.files:
+        try:
+            fix_req = FixRequest(
+                language=req.language,
+                content=file.content,
+                tool=tool
+            )
+            result = await fix_code(fix_req)
+            results.append(f"{file.path}|{result['result']}")
+        except Exception as e:
+            results.append(f"{file.path}|err:{str(e)}")
+
+    return {"result": "\n---\n".join(results)}
 
 
 # ============================================================================
