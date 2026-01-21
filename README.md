@@ -114,8 +114,9 @@ Batch response format: `path1|result1\n---\npath2|result2`
 
 - `GET /` - API overview
 - `GET /health` - Health check (includes tool availability)
-- `GET /languages` - List supported languages and tools
-- `GET /tools/openai` - OpenAI function schemas (structured format)
+- `GET /languages` - List supported languages and tools (verbose JSON)
+- `GET /tools` - **Compressed tool specs (ml-exclusive format for agents)**
+- `GET /tools/openai` - OpenAI function schemas (verbose JSON for OpenAI integration)
 
 ## ML-Exclusive Response Format
 
@@ -189,6 +190,35 @@ err:timeout|code:504|msg:tool_execution_timed_out
 ```
 
 All responses (success + error) use compressed format with `{"result": "..."}` wrapper.
+
+## Agent Tool Discovery
+
+**For AI agents:** Use `GET /tools` endpoint for compressed tool specification:
+
+```bash
+curl http://localhost:8072/tools
+```
+
+Returns ml-exclusive compressed format:
+```json
+{
+  "system": "code_thumbs",
+  "endpoints": {
+    "file_ops": "POST/format/file{path,lang?,tool?}→read+fmt+write|...",
+    "content_ops": "POST/format{lang,content,tool?,check_only?}→fmt|...",
+    "batch_file": "POST/batch/format/files{paths[],lang?,tool?}→multi_fmt|...",
+    "meta": "GET/health→status|GET/languages→17lang_list|..."
+  },
+  "languages": "py→ruff,black,pylint,mypy|js/ts→prettier,eslint,tsc|...",
+  "philosophy": "agent_first→prefer_file_ops_over_content→atomic_operations→...",
+  "usage": {
+    "recommended": "POST/format/file{path}→1_call_atomic",
+    "legacy": "Read→POST/format{content}→parse→Write→5_steps_avoid"
+  }
+}
+```
+
+**Philosophy:** LLM-first design → semantic density → compressed syntax → direct file operations
 
 ## MCP Server
 

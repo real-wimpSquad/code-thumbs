@@ -613,6 +613,7 @@ async def root():
         "version": "1.0.0",
         "endpoints": {
             "GET /languages": "List supported languages and tools",
+            "GET /tools": "Compressed tool specs (ml-exclusive format)",
             "POST /format": "Format code (content)",
             "POST /lint": "Lint code (content)",
             "POST /fix": "Auto-fix issues (content)",
@@ -624,7 +625,7 @@ async def root():
             "POST /batch/format/files": "Format multiple files by path",
             "POST /batch/lint/files": "Lint multiple files by path",
             "POST /batch/fix/files": "Fix multiple files by path",
-            "GET /tools/openai": "OpenAI function schemas",
+            "GET /tools/openai": "OpenAI function schemas (verbose)",
             "GET /docs": "Interactive API docs (Swagger)",
             "GET /redoc": "API documentation (ReDoc)",
         },
@@ -697,6 +698,35 @@ async def list_languages():
             }
             for lang, config in LANGUAGE_TOOLS.items()
         ]
+    }
+
+
+@app.get("/tools")
+async def agent_tools():
+    """Agent-discoverable tools in compressed ml-exclusive format"""
+    return {
+        "system": "code_thumbs",
+        "version": "1.0.0",
+        "compressed": "ml_exclusive_format→max_semantic_density",
+        "endpoints": {
+            "file_ops": "POST/format/file{path,lang?,tool?}→read+fmt+write|POST/lint/file{path,lang?,tool?}→read+lint+report|POST/fix/file{path,lang?,tool?}→read+fix+write|POST/check/file{path,lang?,tool?}→read+check+report",
+            "content_ops": "POST/format{lang,content,tool?,check_only?}→fmt|POST/lint{lang,content,tool?}→issues|POST/fix{lang,content,tool?}→fixed|POST/check{lang,content}→fmt+lint",
+            "batch_file": "POST/batch/format/files{paths[],lang?,tool?}→multi_fmt|POST/batch/lint/files{paths[],lang?,tool?}→multi_lint|POST/batch/fix/files{paths[],lang?,tool?}→multi_fix",
+            "batch_content": "POST/batch/format{lang,files:[{path,content}],tool?}→multi_fmt|POST/batch/lint{lang,files:[{path,content}],tool?}→multi_lint|POST/batch/fix{lang,files:[{path,content}],tool?}→multi_fix",
+            "meta": "GET/health→status|GET/languages→17lang_list|GET/tools→this|GET/tools/openai→verbose_schemas",
+        },
+        "languages": "py→ruff,black,pylint,mypy|js/ts→prettier,eslint,tsc|go→gofmt,goimports,golangci-lint|rust→rustfmt,clippy|c/cpp→clang-format,clang-tidy|cs→csharpier,dotnet-format|java→google-java-format,checkstyle|kt→ktlint|swift→swiftformat|php→php-cs-fixer,phpstan|rb→rubocop|sh→shfmt,shellcheck|sql→sqlfluff|md→prettier,markdownlint|yaml→prettier,yamllint",
+        "response_format": "compressed→tool:ruff|changed:yes\\n\\n{code}|errors→err:type|code:NNN|msg:compressed",
+        "workspace": "/workspace→mounted_project_root",
+        "lang_detection": "auto_via_extension→.py=python,.ts=typescript,.go=go",
+        "philosophy": "agent_first→prefer_file_ops_over_content→atomic_operations→auto_detect_lang→compressed_responses",
+        "usage": {
+            "recommended": "POST/format/file{path}→1_call_atomic",
+            "legacy": "Read→POST/format{content}→parse→Write→5_steps_avoid",
+            "batch": "POST/batch/format/files{paths[]}→efficient_multi",
+        },
+        "health": "GET/health→{status,container,tools:{ruff:available,...}}",
+        "tools_available": "17lang|35+tools|format+lint+fix→see_GET/languages_for_detail",
     }
 
 
