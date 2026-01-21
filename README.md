@@ -63,7 +63,27 @@ curl -X POST http://localhost:8072/batch/lint \
 
 ### Production (Pre-built Images)
 
-See `atomic-pumpkin-deploy` for production deployment using GHCR images.
+```bash
+# Pull pre-built images from GitHub Container Registry
+docker pull ghcr.io/real-wimpsquad/code-thumbs:latest
+docker pull ghcr.io/real-wimpsquad/code-thumbs-api:latest
+
+# Run with docker-compose
+docker-compose up -d
+
+# Or run directly
+docker run -d --name code-thumbs \
+  -v $(pwd):/workspace \
+  ghcr.io/real-wimpsquad/code-thumbs:latest \
+  tail -f /dev/null
+
+docker run -d --name code-thumbs-api \
+  -p 8072:8072 \
+  -v $(pwd):/workspace \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e CODE_THUMBS_CONTAINER=code-thumbs \
+  ghcr.io/real-wimpsquad/code-thumbs-api:latest
+```
 
 ## API Endpoints
 
@@ -208,6 +228,30 @@ Client → API (port 8072) → Docker exec → code-thumbs container (tools)
 - Distinguishes between "tool not installed" vs "code has errors"
 - `/health` endpoint shows tool availability status
 - 30s timeout per operation to prevent hangs
+
+## Integration
+
+### Atomic Pumpkin (Optional)
+
+Code Thumbs can be used as an addon with [Atomic Pumpkin](https://github.com/real-wimpsquad/atomic-pumpkin):
+
+```bash
+make dev ADDONS="code-thumbs"
+```
+
+This mounts the atomic-pumpkin workspace at `/workspace` for formatting/linting project files.
+
+### Standalone
+
+Code Thumbs works independently - just mount your project directory to `/workspace`:
+
+```bash
+docker run -d --name code-thumbs-api \
+  -p 8072:8072 \
+  -v /path/to/your/project:/workspace \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  ghcr.io/real-wimpsquad/code-thumbs-api:latest
+```
 
 ## License
 
