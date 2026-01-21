@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 """
 ============================================================================
@@ -50,10 +51,8 @@ async def ml_exclusive_exception_handler(request: Request, exc: HTTPException):
     detail = exc.detail.replace(" ", "_").replace("'", "").lower()[:100]
     compressed = f"err:{error_type}|code:{exc.status_code}|msg:{detail}"
 
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={"result": compressed}
-    )
+    return JSONResponse(status_code=exc.status_code, content={"result": compressed})
+
 
 # ============================================================================
 # TOOL REGISTRY
@@ -303,6 +302,27 @@ class BatchFixRequest(BaseModel):
 
 
 # ============================================================================
+# FILE PATH REQUEST MODELS
+# ============================================================================
+
+
+class FilePathRequest(BaseModel):
+    path: str = Field(..., description="File path relative to /workspace")
+    language: Optional[str] = Field(
+        None, description="Programming language (auto-detected if not provided)"
+    )
+    tool: Optional[str] = Field(None, description="Specific tool to use (optional)")
+
+
+class BatchFilePathRequest(BaseModel):
+    paths: List[str] = Field(..., description="File paths relative to /workspace")
+    language: Optional[str] = Field(
+        None, description="Programming language (auto-detected if not provided)"
+    )
+    tool: Optional[str] = Field(None, description="Specific tool to use (optional)")
+
+
+# ============================================================================
 # DOCKER EXECUTION HELPERS
 # ============================================================================
 
@@ -345,10 +365,14 @@ def verify_tool_available(tool: str) -> bool:
 
         # Special cases for tools invoked differently
         if tool == "google-java-format":
-            returncode, _, _ = exec_in_container(["test", "-f", "/usr/local/java-tools/google-java-format.jar"])
+            returncode, _, _ = exec_in_container(
+                ["test", "-f", "/usr/local/java-tools/google-java-format.jar"]
+            )
             return returncode == 0
         elif tool == "checkstyle":
-            returncode, _, _ = exec_in_container(["test", "-f", "/usr/local/java-tools/checkstyle.jar"])
+            returncode, _, _ = exec_in_container(
+                ["test", "-f", "/usr/local/java-tools/checkstyle.jar"]
+            )
             return returncode == 0
         elif tool in ["cargo-clippy", "cargo-fmt"]:
             returncode, _, _ = exec_in_container(["cargo", "--version"])
@@ -387,6 +411,36 @@ def read_temp_file(filepath: str) -> str:
 def cleanup_temp_file(filepath: str):
     """Remove temp file from container"""
     exec_in_container(["rm", "-f", filepath])
+
+
+def read_file_from_container(path: str) -> str:
+    """Read file content from container workspace"""
+    # Ensure path is relative to /workspace
+    if not path.startswith("/workspace/"):
+        path = f"/workspace/{path.lstrip('/')}"
+
+    returncode, stdout, stderr = exec_in_container(["cat", path])
+    if returncode != 0:
+        raise HTTPException(
+            status_code=404, detail=f"File not found or not readable: {path}"
+        )
+    return stdout
+
+
+def write_file_to_container(path: str, content: str):
+    """Write content to file in container workspace"""
+    # Ensure path is relative to /workspace
+    if not path.startswith("/workspace/"):
+        path = f"/workspace/{path.lstrip('/')}"
+
+    # Ensure parent directory exists
+    parent_dir = str(Path(path).parent)
+    exec_in_container(["mkdir", "-p", parent_dir])
+
+    # Write file using tee
+    returncode, stdout, stderr = exec_in_container(["tee", path], stdin_data=content)
+    if returncode != 0:
+        raise HTTPException(status_code=500, detail=f"Failed to write file: {stderr}")
 
 
 # ============================================================================
@@ -513,7 +567,7 @@ def compress_fix_response(result: dict) -> str:
 
     if result["remaining_issues"]:
         issues = "|".join(
-            f"L{i.get('line','?')}:{i['message'][:40]}"
+            f"L{i.get('line', '?')}:{i['message'][:40]}"
             for i in result["remaining_issues"][:5]
         )
         return f"{header}\nissues:{issues}\n\n{result['fixed_content']}"
@@ -559,10 +613,17 @@ async def root():
         "version": "1.0.0",
         "endpoints": {
             "GET /languages": "List supported languages and tools",
-            "POST /format": "Format code",
-            "POST /lint": "Lint code",
-            "POST /fix": "Auto-fix issues",
-            "POST /check": "Format + lint combined",
+            "POST /format": "Format code (content)",
+            "POST /lint": "Lint code (content)",
+            "POST /fix": "Auto-fix issues (content)",
+            "POST /check": "Format + lint combined (content)",
+            "POST /format/file": "Format file by path",
+            "POST /lint/file": "Lint file by path",
+            "POST /fix/file": "Fix file by path",
+            "POST /check/file": "Check file by path",
+            "POST /batch/format/files": "Format multiple files by path",
+            "POST /batch/lint/files": "Lint multiple files by path",
+            "POST /batch/fix/files": "Fix multiple files by path",
             "GET /tools/openai": "OpenAI function schemas",
             "GET /docs": "Interactive API docs (Swagger)",
             "GET /redoc": "API documentation (ReDoc)",
@@ -593,7 +654,9 @@ async def health():
 
             tool_status = {}
             for tool in critical_tools + optional_tools:
-                tool_status[tool] = "available" if verify_tool_available(tool) else "missing"
+                tool_status[tool] = (
+                    "available" if verify_tool_available(tool) else "missing"
+                )
 
             all_critical_available = all(
                 tool_status.get(t) == "available" for t in critical_tools
@@ -659,7 +722,11 @@ async def format_code(req: FormatRequest):
     try:
         # Build command based on tool
         if tool == "ruff":
-            cmd = ["ruff", "format" if not req.check_only else "format --check", filepath]
+            cmd = [
+                "ruff",
+                "format" if not req.check_only else "format --check",
+                filepath,
+            ]
         elif tool == "black":
             cmd = ["black", "--check" if req.check_only else "", filepath]
         elif tool == "prettier":
@@ -680,9 +747,21 @@ async def format_code(req: FormatRequest):
                 cmd = ["goimports", "-w", filepath]
         elif tool == "google-java-format":
             if req.check_only:
-                cmd = ["java", "-jar", "/usr/local/java-tools/google-java-format.jar", "--dry-run", filepath]
+                cmd = [
+                    "java",
+                    "-jar",
+                    "/usr/local/java-tools/google-java-format.jar",
+                    "--dry-run",
+                    filepath,
+                ]
             else:
-                cmd = ["java", "-jar", "/usr/local/java-tools/google-java-format.jar", "-i", filepath]
+                cmd = [
+                    "java",
+                    "-jar",
+                    "/usr/local/java-tools/google-java-format.jar",
+                    "-i",
+                    filepath,
+                ]
         elif tool == "clang-format":
             if req.check_only:
                 cmd = ["clang-format", "--dry-run", "-Werror", filepath]
@@ -733,7 +812,7 @@ async def format_code(req: FormatRequest):
         if not verify_tool_available(tool):
             raise HTTPException(
                 status_code=503,
-                detail=f"Tool '{tool}' not available in container. It may not be installed or failed during build."
+                detail=f"Tool '{tool}' not available in container. It may not be installed or failed during build.",
             )
 
         returncode, stdout, stderr = exec_in_container(cmd)
@@ -793,7 +872,14 @@ async def lint_code(req: LintRequest):
         elif tool == "golangci-lint":
             cmd = ["golangci-lint", "run", filepath]
         elif tool == "checkstyle":
-            cmd = ["java", "-jar", "/usr/local/java-tools/checkstyle.jar", "-c", "/usr/local/java-tools/google_checks.xml", filepath]
+            cmd = [
+                "java",
+                "-jar",
+                "/usr/local/java-tools/checkstyle.jar",
+                "-c",
+                "/usr/local/java-tools/google_checks.xml",
+                filepath,
+            ]
         elif tool == "clang-tidy":
             cmd = ["clang-tidy", filepath]
         elif tool == "shellcheck":
@@ -823,7 +909,7 @@ async def lint_code(req: LintRequest):
         if not verify_tool_available(tool):
             raise HTTPException(
                 status_code=503,
-                detail=f"Tool '{tool}' not available in container. It may not be installed or failed during build."
+                detail=f"Tool '{tool}' not available in container. It may not be installed or failed during build.",
             )
 
         returncode, stdout, stderr = exec_in_container(cmd)
@@ -907,7 +993,7 @@ async def fix_code(req: FixRequest):
         if not verify_tool_available(tool):
             raise HTTPException(
                 status_code=503,
-                detail=f"Tool '{tool}' not available in container. It may not be installed or failed during build."
+                detail=f"Tool '{tool}' not available in container. It may not be installed or failed during build.",
             )
 
         returncode, stdout, stderr = exec_in_container(cmd)
@@ -1035,8 +1121,7 @@ async def batch_format(req: BatchFormatRequest):
 
     if not verify_tool_available(tool):
         raise HTTPException(
-            status_code=503,
-            detail=f"Tool '{tool}' not available in container."
+            status_code=503, detail=f"Tool '{tool}' not available in container."
         )
 
     results = []
@@ -1047,7 +1132,7 @@ async def batch_format(req: BatchFormatRequest):
                 language=req.language,
                 content=file.content,
                 tool=tool,
-                check_only=req.check_only
+                check_only=req.check_only,
             )
             result = await format_code(format_req)
             results.append(f"{file.path}|{result['result']}")
@@ -1075,17 +1160,14 @@ async def batch_lint(req: BatchLintRequest):
 
     if not verify_tool_available(tool):
         raise HTTPException(
-            status_code=503,
-            detail=f"Tool '{tool}' not available in container."
+            status_code=503, detail=f"Tool '{tool}' not available in container."
         )
 
     results = []
     for file in req.files:
         try:
             lint_req = LintRequest(
-                language=req.language,
-                content=file.content,
-                tool=tool
+                language=req.language, content=file.content, tool=tool
             )
             result = await lint_code(lint_req)
             results.append(f"{file.path}|{result['result']}")
@@ -1119,22 +1201,329 @@ async def batch_fix(req: BatchFixRequest):
 
     if not verify_tool_available(tool):
         raise HTTPException(
-            status_code=503,
-            detail=f"Tool '{tool}' not available in container."
+            status_code=503, detail=f"Tool '{tool}' not available in container."
         )
 
     results = []
     for file in req.files:
         try:
-            fix_req = FixRequest(
-                language=req.language,
-                content=file.content,
-                tool=tool
-            )
+            fix_req = FixRequest(language=req.language, content=file.content, tool=tool)
             result = await fix_code(fix_req)
             results.append(f"{file.path}|{result['result']}")
         except Exception as e:
             results.append(f"{file.path}|err:{str(e)}")
+
+    return {"result": "\n---\n".join(results)}
+
+
+# ============================================================================
+# FILE PATH ENDPOINTS
+# ============================================================================
+
+
+@app.post("/format/file")
+async def format_file(req: FilePathRequest):
+    """Format a file by path - reads, formats, and writes back"""
+    # Read file content
+    content = read_file_from_container(req.path)
+
+    # Auto-detect language if not provided
+    language = req.language or detect_language(req.path)
+    if not language:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not detect language from path: {req.path}. Please specify language explicitly.",
+        )
+
+    if language not in LANGUAGE_TOOLS:
+        raise HTTPException(status_code=400, detail=f"Unsupported language: {language}")
+
+    lang_config = LANGUAGE_TOOLS[language]
+    tool = req.tool or lang_config["default_format"]
+
+    if tool not in lang_config["format"]:
+        raise HTTPException(
+            status_code=400, detail=f"Tool {tool} not available for {language}"
+        )
+
+    if not verify_tool_available(tool):
+        raise HTTPException(
+            status_code=503, detail=f"Tool '{tool}' not available in container."
+        )
+
+    # Write to temp file for processing
+    filepath = write_temp_file(content, language)
+
+    try:
+        # Build format command
+        if tool == "ruff":
+            cmd = ["ruff", "format", filepath]
+        elif tool == "black":
+            cmd = ["black", filepath]
+        elif tool == "prettier":
+            cmd = ["prettier", "--write", filepath]
+        elif tool == "csharpier":
+            cmd = ["csharpier", filepath]
+        elif tool == "rustfmt":
+            cmd = ["rustfmt", filepath]
+        elif tool == "gofmt":
+            cmd = ["gofmt", "-w", filepath]
+        elif tool == "goimports":
+            cmd = ["goimports", "-w", filepath]
+        elif tool == "google-java-format":
+            cmd = [
+                "java",
+                "-jar",
+                "/usr/local/java-tools/google-java-format.jar",
+                "-i",
+                filepath,
+            ]
+        elif tool == "clang-format":
+            cmd = ["clang-format", "-i", filepath]
+        elif tool == "shfmt":
+            cmd = ["shfmt", "-w", filepath]
+        elif tool == "sqlfluff":
+            cmd = ["sqlfluff", "format", filepath]
+        elif tool == "php-cs-fixer":
+            cmd = ["php-cs-fixer", "fix", filepath]
+        elif tool == "ktlint":
+            cmd = ["ktlint", "-F", filepath]
+        elif tool == "swiftformat":
+            cmd = ["swiftformat", filepath]
+        elif tool == "rubocop":
+            cmd = ["rubocop", "-a", filepath]
+        elif tool == "markdownlint":
+            cmd = ["markdownlint", "--fix", filepath]
+        else:
+            raise HTTPException(status_code=400, detail=f"Unknown tool: {tool}")
+
+        cmd = [c for c in cmd if c]
+        returncode, stdout, stderr = exec_in_container(cmd)
+
+        # Read formatted content
+        formatted_content = read_temp_file(filepath)
+        changed = formatted_content != content
+
+        # Write back to original file if changed
+        if changed:
+            write_file_to_container(req.path, formatted_content)
+
+        result = {
+            "formatted_content": formatted_content,
+            "changed": changed,
+            "tool_used": tool,
+            "path": req.path,
+        }
+
+        return {"result": compress_format_response(result, check_only=False)}
+
+    finally:
+        cleanup_temp_file(filepath)
+
+
+@app.post("/lint/file")
+async def lint_file(req: FilePathRequest):
+    """Lint a file by path"""
+    # Read file content
+    content = read_file_from_container(req.path)
+
+    # Auto-detect language if not provided
+    language = req.language or detect_language(req.path)
+    if not language:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not detect language from path: {req.path}. Please specify language explicitly.",
+        )
+
+    if language not in LANGUAGE_TOOLS:
+        raise HTTPException(status_code=400, detail=f"Unsupported language: {language}")
+
+    lang_config = LANGUAGE_TOOLS[language]
+    tool = req.tool or lang_config["default_lint"]
+
+    if tool not in lang_config["lint"]:
+        raise HTTPException(
+            status_code=400, detail=f"Tool {tool} not available for {language}"
+        )
+
+    if not verify_tool_available(tool):
+        raise HTTPException(
+            status_code=503, detail=f"Tool '{tool}' not available in container."
+        )
+
+    # Use existing lint logic
+    lint_req = LintRequest(language=language, content=content, tool=tool)
+    result = await lint_code(lint_req)
+
+    # Add path to result
+    result_str = result["result"]
+    return {"result": f"path:{req.path}|{result_str}"}
+
+
+@app.post("/fix/file")
+async def fix_file(req: FilePathRequest):
+    """Fix a file by path - reads, fixes, and writes back"""
+    # Read file content
+    content = read_file_from_container(req.path)
+
+    # Auto-detect language if not provided
+    language = req.language or detect_language(req.path)
+    if not language:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not detect language from path: {req.path}. Please specify language explicitly.",
+        )
+
+    if language not in LANGUAGE_TOOLS:
+        raise HTTPException(status_code=400, detail=f"Unsupported language: {language}")
+
+    lang_config = LANGUAGE_TOOLS[language]
+
+    if not lang_config["fix"]:
+        raise HTTPException(
+            status_code=400, detail=f"Auto-fix not supported for {language}"
+        )
+
+    tool = req.tool or lang_config["fix"][0]
+
+    if tool not in lang_config["fix"]:
+        raise HTTPException(
+            status_code=400, detail=f"Tool {tool} cannot auto-fix for {language}"
+        )
+
+    if not verify_tool_available(tool):
+        raise HTTPException(
+            status_code=503, detail=f"Tool '{tool}' not available in container."
+        )
+
+    # Write to temp file for processing
+    filepath = write_temp_file(content, language)
+
+    try:
+        # Build fix command
+        if tool == "ruff":
+            cmd = ["ruff", "check", "--fix", filepath]
+        elif tool == "eslint":
+            cmd = ["eslint", "--fix", filepath]
+        elif tool == "golangci-lint":
+            cmd = ["golangci-lint", "run", "--fix", filepath]
+        elif tool == "sqlfluff":
+            cmd = ["sqlfluff", "fix", filepath]
+        elif tool == "php-cs-fixer":
+            cmd = ["php-cs-fixer", "fix", filepath]
+        elif tool == "ktlint":
+            cmd = ["ktlint", "-F", filepath]
+        elif tool == "rubocop":
+            cmd = ["rubocop", "-a", filepath]
+        elif tool == "markdownlint":
+            cmd = ["markdownlint", "--fix", filepath]
+        else:
+            raise HTTPException(status_code=400, detail=f"Unknown tool: {tool}")
+
+        returncode, stdout, stderr = exec_in_container(cmd)
+
+        # Read fixed content
+        fixed_content = read_temp_file(filepath)
+        changes_made = fixed_content != content
+
+        # Write back to original file if changed
+        if changes_made:
+            write_file_to_container(req.path, fixed_content)
+
+        # Parse remaining issues
+        remaining_output = stdout + stderr
+        remaining_issues = (
+            parse_ruff_output(remaining_output)
+            if tool == "ruff"
+            else parse_eslint_output(remaining_output)
+        )
+
+        issues_fixed = ["Auto-fixed issues"] if changes_made else []
+
+        result = {
+            "fixed_content": fixed_content,
+            "issues_fixed": issues_fixed,
+            "remaining_issues": [i.dict() for i in remaining_issues],
+            "tool_used": tool,
+            "changes_made": changes_made,
+            "path": req.path,
+        }
+
+        return {"result": compress_fix_response(result)}
+
+    finally:
+        cleanup_temp_file(filepath)
+
+
+@app.post("/check/file")
+async def check_file(req: FilePathRequest):
+    """Check a file by path - comprehensive format + lint check"""
+    # Read file content
+    content = read_file_from_container(req.path)
+
+    # Auto-detect language if not provided
+    language = req.language or detect_language(req.path)
+    if not language:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not detect language from path: {req.path}. Please specify language explicitly.",
+        )
+
+    # Use existing check logic
+    check_req = CheckRequest(language=language, content=content)
+    result = await check_code(check_req)
+
+    # Add path to result
+    result_str = result["result"]
+    return {"result": f"path:{req.path}|{result_str}"}
+
+
+# ============================================================================
+# BATCH FILE PATH ENDPOINTS
+# ============================================================================
+
+
+@app.post("/batch/format/files")
+async def batch_format_files(req: BatchFilePathRequest):
+    """Format multiple files by path"""
+    results = []
+    for path in req.paths:
+        try:
+            file_req = FilePathRequest(path=path, language=req.language, tool=req.tool)
+            result = await format_file(file_req)
+            results.append(f"{path}|{result['result']}")
+        except Exception as e:
+            results.append(f"{path}|err:{str(e)}")
+
+    return {"result": "\n---\n".join(results)}
+
+
+@app.post("/batch/lint/files")
+async def batch_lint_files(req: BatchFilePathRequest):
+    """Lint multiple files by path"""
+    results = []
+    for path in req.paths:
+        try:
+            file_req = FilePathRequest(path=path, language=req.language, tool=req.tool)
+            result = await lint_file(file_req)
+            results.append(result["result"])
+        except Exception as e:
+            results.append(f"path:{path}|err:{str(e)}")
+
+    return {"result": "\n---\n".join(results)}
+
+
+@app.post("/batch/fix/files")
+async def batch_fix_files(req: BatchFilePathRequest):
+    """Fix multiple files by path"""
+    results = []
+    for path in req.paths:
+        try:
+            file_req = FilePathRequest(path=path, language=req.language, tool=req.tool)
+            result = await fix_file(file_req)
+            results.append(f"{path}|{result['result']}")
+        except Exception as e:
+            results.append(f"{path}|err:{str(e)}")
 
     return {"result": "\n---\n".join(results)}
 
@@ -1251,6 +1640,111 @@ async def openai_tool_schemas():
                             },
                         },
                         "required": ["language", "content"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "format_file",
+                    "description": "Format a file by path. Reads file from /workspace, formats it, and writes back. Language auto-detected from extension.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "File path relative to /workspace (e.g., 'src/main.py')",
+                            },
+                            "language": {
+                                "type": "string",
+                                "enum": list(LANGUAGE_TOOLS.keys()),
+                                "description": "Programming language (optional, auto-detected from extension)",
+                            },
+                            "tool": {
+                                "type": "string",
+                                "description": "Specific formatter tool (optional)",
+                            },
+                        },
+                        "required": ["path"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "lint_file",
+                    "description": "Lint a file by path. Reads file from /workspace and returns lint issues. Language auto-detected.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "File path relative to /workspace",
+                            },
+                            "language": {
+                                "type": "string",
+                                "enum": list(LANGUAGE_TOOLS.keys()),
+                                "description": "Programming language (optional, auto-detected)",
+                            },
+                            "tool": {
+                                "type": "string",
+                                "description": "Specific linter tool (optional)",
+                            },
+                        },
+                        "required": ["path"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "fix_file",
+                    "description": "Fix a file by path. Reads file, auto-fixes issues, and writes back. Language auto-detected.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "File path relative to /workspace",
+                            },
+                            "language": {
+                                "type": "string",
+                                "enum": list(LANGUAGE_TOOLS.keys()),
+                                "description": "Programming language (optional, auto-detected)",
+                            },
+                            "tool": {
+                                "type": "string",
+                                "description": "Specific fixing tool (optional)",
+                            },
+                        },
+                        "required": ["path"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "batch_format_files",
+                    "description": "Format multiple files by path in one request. Each file is formatted and written back.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "paths": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Array of file paths relative to /workspace",
+                            },
+                            "language": {
+                                "type": "string",
+                                "enum": list(LANGUAGE_TOOLS.keys()),
+                                "description": "Programming language (optional, auto-detected per file)",
+                            },
+                            "tool": {
+                                "type": "string",
+                                "description": "Specific formatter tool (optional)",
+                            },
+                        },
+                        "required": ["paths"],
                     },
                 },
             },
