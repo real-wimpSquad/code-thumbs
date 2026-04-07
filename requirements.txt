@@ -1,0 +1,16 @@
+# ============================================================================
+# Copyright 2026 real-wimpSquad
+# SPDX-License-Identifier: MIT
+# See LICENSE file for full license text.
+# ============================================================================
+
+# API Framework
+fastapi
+uvicorn[standard]
+pydantic
+
+# HTTP Client (for MCP server)
+httpx
+
+# MCP SDK
+mcp

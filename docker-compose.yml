@@ -1,0 +1,39 @@
+# Code Thumbs - Development Deployment
+
+services:
+  # Code formatter/linter tools container
+  code-thumbs:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: code_thumbs
+    restart: unless-stopped
+    volumes:
+      - .:/workspace
+    working_dir: /workspace
+    command: tail -f /dev/null
+
+  # Code Thumbs API - HTTP/MCP/OpenAI interface
+  code-thumbs-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: code_thumbs_api
+    restart: unless-stopped
+    ports:
+      - "8072:8072"
+    volumes:
+      - ./src/api_code_thumbs.py:/app/api_code_thumbs.py
+      - .:/workspace
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PORT=8072
+    depends_on:
+      - code-thumbs
+    command: ["python3", "/app/api_code_thumbs.py"]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8072/health', timeout=5).read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
